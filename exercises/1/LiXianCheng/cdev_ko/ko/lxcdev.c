@@ -4,9 +4,12 @@
 #include <linux/cdev.h>
 #include <linux/slab.h>
 #include <linux/fs.h>
-#include <linux/device.h>
-#include <asm/uaccess.h>
-#include <linux/kfifo.h>
+#include <linux/device.h> // device_create
+#include <asm/uaccess.h> // access_ok
+#include <linux/kfifo.h> // kfifo
+#include <linux/poll.h> // poll
+#include <linux/wait.h> // wake_up
+#include <linux/sched.h> // wake_up 中TASK_NORMAL
 
 MODULE_LICENSE("GPL");
 MODULE_AUTHOR("lxc");
@@ -25,6 +28,7 @@ struct dev_data
 	struct cdev dev_cdev; // 设备信息
 	struct kfifo dev_fifo; // 存储加密后数据 
 	struct semaphore dev_sem; // 同步信号量
+	wait_queue_head_t read_wait_queue; // 读进程等待队列
 	dev_t dev_id; // 设备id	
 };
 
@@ -78,7 +82,7 @@ long lxc_unlocked_ioctl(struct file *filp, unsigned int cmd, unsigned long arg)
 			break;
 	}
 
-	return 0;
+	return result;
 }
 
 // ioctl实现，当前未使用到
@@ -95,15 +99,17 @@ long lxc_compat_ioctl(struct file *filp, unsigned int cmd, unsigned long arg)
 			result = -ENOTTY;
 			break;
 	}
-	return 0;
+	return result;
 }
 
+// open实现
 int lxc_open(struct inode *inodp, struct file *filp)
 {
 	printk(KERN_DEBUG"lxc:lxc_open\n");
 	return 0;
 }
 
+// read实现
 ssize_t lxc_read(struct file *filp, char __user *buff, size_t count, loff_t *offp)
 {
 	ssize_t result = 0;
@@ -116,6 +122,13 @@ ssize_t lxc_read(struct file *filp, char __user *buff, size_t count, loff_t *off
 	{
 		printk(KERN_DEBUG"lxc:do nothing when count is 0\n");
 		return 0;
+	}
+
+	// 检查用户空间缓冲区和存储大小
+	if (1 != access_ok(VERITY_WRITE, buff, count))
+	{
+		printk(KERN_ERR"lxc:too less buff size to get %d len, or user ptr invalid\n", count);
+		return -ENOMEM;
 	}
 
 	if (0 != down_interruptible(&global_data->dev_sem))
@@ -157,6 +170,7 @@ ssize_t lxc_read(struct file *filp, char __user *buff, size_t count, loff_t *off
 	return result;
 }
 
+// write实现
 ssize_t lxc_write(struct file *filp, const char __user *buff, size_t count, loff_t *offp)
 {
 	size_t remain_len = 0;
@@ -174,6 +188,12 @@ ssize_t lxc_write(struct file *filp, const char __user *buff, size_t count, loff
 		return 0;
 	}
 
+	if (1 != access_ok(VERITY_READ, buff, count))
+	{
+		printk(KERN_ERR"lxc:invalid user ptr\n");
+		return -EFAULT;
+	}
+
 	if (0 != down_interruptible(&global_data->dev_sem))
 	{
 		printk(KERN_ERR"lxc:wait sem error\n");
@@ -185,6 +205,9 @@ ssize_t lxc_write(struct file *filp, const char __user *buff, size_t count, loff
 		// 根据输入当前的长度，计算剩余可以写入的长度
 		if (kfifo_is_full(&global_data->dev_fifo))
 		{
+			// 唤醒读进程
+			wake_up(&global_data->read_wait_queue);
+
 			printk(KERN_DEBUG"lxc:fifo is full\n");
 			result = 0;
 			break;
@@ -215,10 +238,14 @@ ssize_t lxc_write(struct file *filp, const char __user *buff, size_t count, loff
 
 				result = kfifo_in(&global_data->dev_fifo, global_data->dev_buff, writen_len);
 				printk(KERN_DEBUG"lxc:push fifo len = %d\n", result);
+
+				// 唤醒读进程
+				wake_up(&global_data->read_wait_queue);
 			}
 		}
 		else
-		{
+		{	
+			wake_up(&global_data->read_wait_queue);
 			printk(KERN_DEBUG"lxc:fifo is full\n");
 			result = 0;	
 		}
@@ -230,10 +257,46 @@ ssize_t lxc_write(struct file *filp, const char __user *buff, size_t count, loff
 	return result;
 }
 
+// release实现
 int lxc_release(struct inode *inodp, struct file *filp)
 {
 	printk(KERN_DEBUG"lxc:lxc_release\n");
 	return 0;
+}
+
+// lseek实现
+loff_t lxc_llseek(struct file *filp, loff_t off, int whence)
+{
+	printk(KERN_DEBUG"lxc:lxc_llseek\n");
+	return 0;
+}
+
+// poll实现
+unsigned int lxc_poll(struct file *filp, poll_table *wait)
+{
+	unsigned int mask = 0;
+	unsigned int fifo_len = 0;
+
+	printk(KERN_DEBUG"lxc:lxc_poll\n");
+
+	// 添加到读等待队列中，并非立即休眠，而只是添加到队列中。
+	poll_wait(filp, &global_data->read_wait_queue, wait);
+
+	if (0 != down_interruptible(&global_data->dev_sem))
+	{
+		printk(KERN_ERR"lxc:wait sem error\n");
+		return mask;
+	}
+
+	fifo_len = kfifo_len(&global_data->dev_fifo);
+	if (fifo_len > 0)
+	{
+		mask |= POLLIN | POLLRDNORM;
+	}
+
+	up(&global_data->dev_sem);
+
+	return mask;
 }
 
 // 设备文件操作
@@ -246,6 +309,8 @@ const struct file_operations lxc_file_operations =
 	.release = lxc_release,
 	.unlocked_ioctl = lxc_unlocked_ioctl,
 	.compat_ioctl = lxc_compat_ioctl,
+	.poll = lxc_poll,
+	.llseek = lxc_llseek,
 };
 
 struct class * lxcdev_class = NULL;
@@ -267,8 +332,7 @@ static int __init lxcdev_init(void)
 			result = -ENOMEM;
 			goto exit;
 		}
-		memset(global_data, 0, sizeof(struct dev_data));
-		
+
 		// 分配FIFO
 		result = kfifo_alloc(&global_data->dev_fifo, BUFF_LEN, GFP_KERNEL);
 		if (0 != result)
@@ -278,8 +342,14 @@ static int __init lxcdev_init(void)
 			goto release_global; 
 		}
 
+		memset(global_data->dev_buff, 0, sizeof(BUFF_LEN));
+		global_data->dev_id = 0;
+
 		// 初始化信号量
 		sema_init(&global_data->dev_sem, 1);
+
+		// 初始化读等待队列
+		init_waitqueue_head(&global_data->read_wait_queue);
 
 		// 分配设备号
 		result = alloc_chrdev_region(&(global_data->dev_id), 0, 1, "lxcdev");	
@@ -358,4 +428,3 @@ static void __exit lxcdev_uninit(void)
 
 module_init(lxcdev_init);
 module_exit(lxcdev_uninit);
-
