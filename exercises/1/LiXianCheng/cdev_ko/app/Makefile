@@ -1,5 +1,5 @@
-all:main.o
-	g++ -g main.cpp -o a.out -luuid
+all:app.o
+	g++ -g app.cpp -o a.out -luuid
 
 clean:
 	rm -rf *.o
