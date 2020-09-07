@@ -11,5 +11,6 @@ app文件夹：
   Makefile
 
 更新日志：
+2020-09-07：增加修改sys_call_table，实现hook系统调用处理方式，目前只hook了sys_close，进行技术验证。
 2020-09-05：内核模块增加poll实现。测试程序增加select/poll两种方式读取数据。
 2020-08-26：内核模块实现open/read/write/ioctl。
