@@ -30,42 +30,21 @@ struct dev_data
 	struct semaphore dev_sem; // 同步信号量
 	wait_queue_head_t read_wait_queue; // 读进程等待队列
 	dev_t dev_id; // 设备id	
-};
+} __attribute__((packed));
 
 // 全局设备信息
 struct dev_data * global_data = NULL;
+struct class * lxcdev_class = NULL;
+
+unsigned int src_cr0 = 0;
+unsigned long *sys_call_table_address = NULL;
+
+// sys_xxx原型
+asmlinkage long (*src_sys_close)(unsigned int fd);
+asmlinkage long lxc_sys_close(unsigned int fd);
 
 // 获取当前FIFO中存储数据长度
-long get_fifo_len(struct file *filp, unsigned long arg)
-{
-	long result = 0;
-	unsigned int fifo_len = 0;
-
-	printk(KERN_ALERT"lxc:user ptr = %p\n", (void *)arg);
-
-	if (1 != access_ok(VERIFY_WRITE, arg, sizeof(unsigned long)))
-	{
-		printk(KERN_ERR"lxc:invalid user ptr\n");
-		return -EFAULT;
-	}
-
-	if (0 != down_interruptible(&global_data->dev_sem))
-	{
-		printk(KERN_ERR"lxc:wait sem error\n");
-		return -ERESTARTSYS;
-	}
-
-	fifo_len = kfifo_len(&global_data->dev_fifo);
-	if (0 != copy_to_user((void __user *)arg, &fifo_len, sizeof(unsigned long)))
-	{
-		printk(KERN_ERR"lxc:copy_to_user error\n");
-		result = -EFAULT;
-	}
-
-	up(&global_data->dev_sem);
-
-	return result;
-}
+long get_fifo_len(struct file *filp, unsigned long arg);
 
 // ioctl实现
 long lxc_unlocked_ioctl(struct file *filp, unsigned int cmd, unsigned long arg)
@@ -313,14 +292,10 @@ const struct file_operations lxc_file_operations =
 	.llseek = lxc_llseek,
 };
 
-struct class * lxcdev_class = NULL;
-
-static int __init lxcdev_init(void)
+static int __init dev_init(void)
 {
 	int result = 0;
 	struct device * dev_instance = NULL;
-
-	printk(KERN_DEBUG"lxc:dev_init\n");
 
 	do
 	{
@@ -330,7 +305,7 @@ static int __init lxcdev_init(void)
 		{
 			printk(KERN_ERR"lxc:init, kmalloc error\n");
 			result = -ENOMEM;
-			goto exit;
+			goto final_exit;
 		}
 
 		// 分配FIFO
@@ -390,7 +365,7 @@ static int __init lxcdev_init(void)
 			goto destroy_class;
 		}
 
-		goto exit;
+		goto final_exit;
 	}
 	while (false);
 
@@ -409,14 +384,103 @@ release_fifo:
 release_global:
 	kfree(global_data);
 
-exit:
+final_exit:
+	return result;
+}
+
+static int __init get_sys_call_table(void)
+{
+	// todo 从/proc/kallsyms或/boot/System.map中读取
+	sys_call_table_address = (unsigned long *) 0xc17921c0;
+
+	//if (sys_call_table_address[__NR_close] != (unsigned long)sys_close)
+	//{
+	//	printk(KERN_ERR"lxc:invalid sys_call_table address\n");
+	//	return -EFAULT;
+	//}
+
+	printk(KERN_DEBUG"lxc:find sys_call_table address\n");
+	return 0;
+}
+
+unsigned int close_cr(void)
+{
+	unsigned int cr0 = 0;
+	unsigned int ret = 0;
+	asm volatile("movl %%cr0, %%eax" : "=a"(cr0));
+	ret = cr0;
+	cr0 &= 0xfffeffff;
+	asm volatile("movl %%eax, %%cr0" : : "a"(cr0));
+	return ret;
+}
+
+void open_cr(unsigned int old_val)
+{
+	asm volatile("movl %%eax, %%cr0" : : "a"(old_val));
+}
+
+static int __init hook_init(void)
+{
+	printk(KERN_DEBUG"lxc:hook_init\n");
+
+	if (0 != get_sys_call_table())
+	{
+		printk(KERN_ERR"lxc:get_sys_call_table error\n");
+		return -EFAULT;
+	}
+	
+	// 获取原地址保存
+	src_sys_close = sys_call_table_address[__NR_close];
+
+	src_cr0 = close_cr();
+	sys_call_table_address[__NR_close] = (unsigned long)lxc_sys_close;
+	open_cr(src_cr0);
+
+	return 0;
+}
+
+static int __init lxcdev_init(void)
+{
+	int result = 0;
+
+	printk(KERN_DEBUG"lxc:dev_init\n");
+
+	do
+	{
+		// 初始化hook
+		result = hook_init();
+		if (0 != result)
+		{
+			break;
+		}
+
+		// 初始化设备
+		result = dev_init();
+		if (0 != result)
+		{
+			break;
+		}
+	}
+	while (false);
+
 	printk(KERN_ALERT"lxc:init, return result %d\n", result);
 	return result;
+}
+
+static void __exit hook_uninit(void)
+{
+	printk(KERN_DEBUG"lxc:hook_uninit\n");
+
+	src_cr0 = close_cr();
+	sys_call_table_address[__NR_close] = (unsigned long)src_sys_close;
+	open_cr(src_cr0);
 }
 
 static void __exit lxcdev_uninit(void)
 {
 	printk(KERN_DEBUG"lxc:dev_uninit\n");
+
+	hook_uninit();
 
 	device_destroy(lxcdev_class, global_data->dev_id);
 	class_destroy(lxcdev_class);
@@ -428,3 +492,42 @@ static void __exit lxcdev_uninit(void)
 
 module_init(lxcdev_init);
 module_exit(lxcdev_uninit);
+
+long get_fifo_len(struct file *filp, unsigned long arg)
+{
+	long result = 0;
+	unsigned int fifo_len = 0;
+
+	printk(KERN_ALERT"lxc:user ptr = %p\n", (void *)arg);
+
+	if (1 != access_ok(VERIFY_WRITE, arg, sizeof(unsigned long)))
+	{
+		printk(KERN_ERR"lxc:invalid user ptr\n");
+		return -EFAULT;
+	}
+
+	if (0 != down_interruptible(&global_data->dev_sem))
+	{
+		printk(KERN_ERR"lxc:wait sem error\n");
+		return -ERESTARTSYS;
+	}
+
+	fifo_len = kfifo_len(&global_data->dev_fifo);
+	if (0 != copy_to_user((void __user *)arg, &fifo_len, sizeof(unsigned long)))
+	{
+		printk(KERN_ERR"lxc:copy_to_user error\n");
+		result = -EFAULT;
+	}
+
+	up(&global_data->dev_sem);
+
+	return result;
+}
+
+asmlinkage long lxc_sys_close(unsigned int fd)
+{
+	long result = 0;
+	result = (*src_sys_close)(fd);
+	return result;
+}
+
