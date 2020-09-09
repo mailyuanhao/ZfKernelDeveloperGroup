@@ -10,6 +10,7 @@
 #include <linux/poll.h> // poll
 #include <linux/wait.h> // wake_up
 #include <linux/sched.h> // wake_up 中TASK_NORMAL
+#include <linux/file.h> // fget
 
 MODULE_LICENSE("GPL");
 MODULE_AUTHOR("lxc");
@@ -42,6 +43,8 @@ unsigned long *sys_call_table_address = NULL;
 // sys_xxx原型
 asmlinkage long (*src_sys_close)(unsigned int fd);
 asmlinkage long lxc_sys_close(unsigned int fd);
+asmlinkage long (*src_sys_open)(const char __user *filename, int flag, umode_t mode);
+asmlinkage long lxc_sys_open(const char __user *filename, int flag, umode_t mode);
 
 // 获取当前FIFO中存储数据长度
 long get_fifo_len(struct file *filp, unsigned long arg);
@@ -430,9 +433,11 @@ static int __init hook_init(void)
 	}
 	
 	// 获取原地址保存
+	src_sys_open = sys_call_table_address[__NR_open];
 	src_sys_close = sys_call_table_address[__NR_close];
 
 	src_cr0 = close_cr();
+	sys_call_table_address[__NR_open] = (unsigned long)lxc_sys_open;
 	sys_call_table_address[__NR_close] = (unsigned long)lxc_sys_close;
 	open_cr(src_cr0);
 
@@ -472,6 +477,7 @@ static void __exit hook_uninit(void)
 	printk(KERN_DEBUG"lxc:hook_uninit\n");
 
 	src_cr0 = close_cr();
+	sys_call_table_address[__NR_open] = (unsigned long)src_sys_open;
 	sys_call_table_address[__NR_close] = (unsigned long)src_sys_close;
 	open_cr(src_cr0);
 }
@@ -520,6 +526,44 @@ long get_fifo_len(struct file *filp, unsigned long arg)
 	}
 
 	up(&global_data->dev_sem);
+
+	return result;
+}
+
+asmlinkage long lxc_sys_open(const char __user *filename, int flag, umode_t mode)
+{
+	long result = 0;
+	char *path = NULL;
+	long path_len = 0;
+	char *ext = NULL;
+	struct file *open_file = NULL;
+
+	// 调用原始打开
+	result = (*src_sys_open)(filename, flag, mode);
+
+	// 打开成功成功后
+	if (result > 0)
+	{
+		//open_file = fget(result);
+
+		path_len = strlen_user(filename);
+		path = (char *)kmalloc(path_len + 1, GFP_KERNEL);
+
+		if (NULL != path)
+		{
+			memset(path, 0, path_len + 1);
+			if (0 == copy_from_user(path, filename, path_len))
+			{
+				ext = strrchr(path, '.');
+				if (NULL != ext && strcasecmp(ext, ".txt") == 0)
+				{
+					printk(KERN_DEBUG"lxc:pid = %d, open %s, result:%ld\n", current->pid, path, result);
+				}
+			}			
+
+			kfree(path);
+		}
+	}
 
 	return result;
 }
