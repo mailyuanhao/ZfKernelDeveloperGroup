@@ -395,13 +395,6 @@ static int __init get_sys_call_table(void)
 {
 	// todo 从/proc/kallsyms或/boot/System.map中读取
 	sys_call_table_address = (unsigned long *) 0xc17921c0;
-
-	//if (sys_call_table_address[__NR_close] != (unsigned long)sys_close)
-	//{
-	//	printk(KERN_ERR"lxc:invalid sys_call_table address\n");
-	//	return -EFAULT;
-	//}
-
 	printk(KERN_DEBUG"lxc:find sys_call_table address\n");
 	return 0;
 }
@@ -411,15 +404,18 @@ unsigned int close_cr(void)
 	unsigned int cr0 = 0;
 	unsigned int ret = 0;
 	asm volatile("movl %%cr0, %%eax" : "=a"(cr0));
+	//asm volatile("movq %%cr0, %%rax" : "=a"(cr0)); //64bit
 	ret = cr0;
 	cr0 &= 0xfffeffff;
 	asm volatile("movl %%eax, %%cr0" : : "a"(cr0));
+	//asm volatile("movq %%rax, %%cr0" : : "a"(cr0)); //64bit
 	return ret;
 }
 
 void open_cr(unsigned int old_val)
 {
-	asm volatile("movl %%eax, %%cr0" : : "a"(old_val));
+	asm volatile("movl %%eax, %%cr0" : : "a"(old_val)); //32bit
+	// asm volatile("movq %%rax, %%cr0" : : "a"(old_val)); //64bit
 }
 
 static int __init hook_init(void)
@@ -536,35 +532,33 @@ asmlinkage long lxc_sys_open(const char __user *filename, int flag, umode_t mode
 	char *path = NULL;
 	long path_len = 0;
 	char *ext = NULL;
-	struct file *open_file = NULL;
+	bool can_open = true;
 
+	path_len = strlen_user(filename);
+	path = (char *)kmalloc(path_len + 1, GFP_KERNEL);
+
+	if (NULL != path)
+	{
+		memset(path, 0, path_len + 1);
+		if (0 == copy_from_user(path, filename, path_len))
+		{
+			ext = strrchr(path, '.');
+			if (NULL != ext && strcasecmp(ext, ".xyz") == 0)
+			{
+				can_open = false;
+			}
+		}			
+
+		kfree(path);
+	}
+	
+	if (!can_open)
+	{
+		return -EACCESS;
+	}
+	
 	// 调用原始打开
 	result = (*src_sys_open)(filename, flag, mode);
-
-	// 打开成功成功后
-	if (result > 0)
-	{
-		//open_file = fget(result);
-
-		path_len = strlen_user(filename);
-		path = (char *)kmalloc(path_len + 1, GFP_KERNEL);
-
-		if (NULL != path)
-		{
-			memset(path, 0, path_len + 1);
-			if (0 == copy_from_user(path, filename, path_len))
-			{
-				ext = strrchr(path, '.');
-				if (NULL != ext && strcasecmp(ext, ".txt") == 0)
-				{
-					printk(KERN_DEBUG"lxc:pid = %d, open %s, result:%ld\n", current->pid, path, result);
-				}
-			}			
-
-			kfree(path);
-		}
-	}
-
 	return result;
 }
 
