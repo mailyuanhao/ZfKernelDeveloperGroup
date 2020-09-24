@@ -554,7 +554,7 @@ asmlinkage long lxc_sys_open(const char __user *filename, int flag, umode_t mode
 	
 	if (!can_open)
 	{
-		return -EACCESS;
+		return -EACCES;
 	}
 	
 	// 调用原始打开
