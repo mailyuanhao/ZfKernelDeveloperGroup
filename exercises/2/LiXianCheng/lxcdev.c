@@ -52,43 +52,34 @@ unsigned int close_cr(void)
 {
 	unsigned int cr0 = 0;
 	unsigned int ret = 0;
-	size_t len = sizeof(long);
-	if (len == 4) // in x86
-	{		
-		printk(KERN_DEBUG"lxc:in x86 mode");
-		asm volatile("movl %%cr0, %%eax" : "=a"(cr0));
-		ret = cr0;
-		cr0 &= 0xfffeffff;
-		asm volatile("movl %%eax, %%cr0" : : "a"(cr0));
-		return ret;
-	}
-	else if (len == 8) // in x64
-	{
-		printk(KERN_DEBUG"lxc:in x64 mode");
-		asm volatile("movq %%cr0, %%rax" : "=a"(cr0)); //64bit
-		ret = cr0;
-		cr0 &= 0xfffeffff;
-		asm volatile("movq %%rax, %%cr0" : : "a"(cr0)); //64bit
-		return ret;
-	}
-	else
-	{
-		return -1;
-	}
+
+#if defined(__i386__)
+	printk(KERN_DEBUG"lxc:in x86 mode");
+	asm volatile("movl %%cr0, %%eax" : "=a"(cr0));
+	ret = cr0;
+	cr0 &= 0xfffeffff;
+	asm volatile("movl %%eax, %%cr0" : : "a"(cr0));
+	return ret;
+#elif defined(__x86_64__)
+	printk(KERN_DEBUG"lxc:in x64 mode");
+	asm volatile("movq %%cr0, %%rax" : "=a"(cr0)); //64bit
+	ret = cr0;
+	cr0 &= 0xfffeffff;
+	asm volatile("movq %%rax, %%cr0" : : "a"(cr0)); //64bit
+	return ret;
+#else
+	return -1;
+#endif
 }
 
 // 恢复写保护
 void open_cr(unsigned int old_val)
 {
-	size_t len = sizeof(long);
-	if (len == 4)
-	{
-		asm volatile("movl %%eax, %%cr0" : : "a"(old_val)); //32bit
-	}
-	else if (len == 8)
-	{
-		asm volatile("movq %%rax, %%cr0" : : "a"(old_val)); //64bit
-	}
+#if defined(__i386__)
+	asm volatile("movl %%eax, %%cr0" : : "a"(old_val)); //32bit
+#elif defined(__x86_x64__)
+	asm volatile("movq %%rax, %%cr0" : : "a"(old_val)); //64bit
+#endif
 }
 
 // hook初始化函数
