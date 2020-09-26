@@ -38,7 +38,7 @@ static int __init get_sys_call_table(void)
 	}
 	else
 	{
-		printk(KERN_DEBUG"lxc:sys_call_table:0x%x", sys_call_table);
+		printk(KERN_DEBUG"lxc:sys_call_table:0x%lx", sys_call_table);
 	}
 
 	sys_call_table_address = (unsigned long *) sys_call_table;
