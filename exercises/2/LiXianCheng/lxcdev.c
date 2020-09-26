@@ -11,106 +11,180 @@
 #include <linux/wait.h> // wake_up
 #include <linux/sched.h> // wake_up 中TASK_NORMAL
 #include <linux/file.h> // fget
-#include <linux/kallsyms.h> // kallsyms_lookup_name
+#include "lxchook.h"
 
 MODULE_LICENSE("GPL");
 MODULE_AUTHOR("lxc");
 MODULE_DESCRIPTION("this is a first char device driver");
 
-unsigned int src_cr0 = 0; // 原始cr0值
-unsigned long *sys_call_table_address = NULL; // 获取的sys_call_table地址
+#define BUFF_LEN 4096 //临时缓冲区大小
 
-// 系统调用 sys_xxx原型
-asmlinkage long (*src_sys_close)(unsigned int fd);
-asmlinkage long lxc_sys_close(unsigned int fd);
-asmlinkage long (*src_sys_open)(const char __user *filename, int flag, umode_t mode);
-asmlinkage long lxc_sys_open(const char __user *filename, int flag, umode_t mode);
+// ioctl相关 
+#define LXC_IOC_MAGIC 'L' // 魔术字
+#define LXC_IOCTL_GET_FIFO_LEN _IOR(LXC_IOC_MAGIC,1, unsigned long)
 
-// 获取sys_call_table
-static int __init get_sys_call_table(void)
+// 自定义数据结构，存储设备信息等
+struct dev_data
 {
-	// 或者从/proc/kallsyms或/boot/System.map中读取
-	unsigned long sys_call_table = kallsyms_lookup_name("sys_call_table");
-	if (0 == sys_call_table)
+	struct cdev dev_cdev; // 设备信息
+	struct semaphore dev_sem; // 同步信号量
+	dev_t dev_id; // 设备id	
+} __attribute__((packed));
+
+// 全局设备信息
+struct dev_data * global_data = NULL;
+struct class * lxcdev_class = NULL;
+
+// ioctl实现
+long lxc_unlocked_ioctl(struct file *filp, unsigned int cmd, unsigned long arg)
+{
+	long result = 0;
+	printk(KERN_DEBUG"lxc:lxc_unlocked_ioctl, cmd = %u\n", cmd);
+	switch (cmd)
 	{
-		printk(KERN_ERR"lxc:lookup sys_call_table address error\n");
-		return -1;
-	}
-	else
-	{
-		printk(KERN_DEBUG"lxc:sys_call_table:0x%lx", sys_call_table);
+		case LXC_IOCTL_GET_FIFO_LEN:	
+			break;
+		default:
+			result = -ENOTTY;
+			break;
 	}
 
-	sys_call_table_address = (unsigned long *) sys_call_table;
-	printk(KERN_DEBUG"lxc:find sys_call_table address\n");
+	return result;
+}
 
+// open实现
+int lxc_open(struct inode *inodp, struct file *filp)
+{
+	printk(KERN_DEBUG"lxc:lxc_open\n");
 	return 0;
 }
 
-// 关闭写保护
-unsigned int close_cr(void)
+// read实现
+ssize_t lxc_read(struct file *filp, char __user *buff, size_t count, loff_t *offp)
 {
-	unsigned int cr0 = 0;
-	unsigned int ret = 0;
-
-#if defined(__i386__)
-	printk(KERN_DEBUG"lxc:in x86 mode");
-	asm volatile("movl %%cr0, %%eax" : "=a"(cr0));
-	ret = cr0;
-	cr0 &= 0xfffeffff;
-	asm volatile("movl %%eax, %%cr0" : : "a"(cr0));
-	return ret;
-#elif defined(__x86_64__)
-	printk(KERN_DEBUG"lxc:in x64 mode");
-	asm volatile("movq %%cr0, %%rax" : "=a"(cr0)); //64bit
-	ret = cr0;
-	cr0 &= 0xfffeffff;
-	asm volatile("movq %%rax, %%cr0" : : "a"(cr0)); //64bit
-	return ret;
-#else
-	return -1;
-#endif
-}
-
-// 恢复写保护
-void open_cr(unsigned int old_val)
-{
-#if defined(__i386__)
-	asm volatile("movl %%eax, %%cr0" : : "a"(old_val)); //32bit
-#elif defined(__x86_x64__)
-	asm volatile("movq %%rax, %%cr0" : : "a"(old_val)); //64bit
-#endif
-}
-
-// hook初始化函数
-static int __init hook_init(void)
-{
-	printk(KERN_DEBUG"lxc:hook_init\n");
-
-	if (0 != get_sys_call_table())
-	{
-		printk(KERN_ERR"lxc:get_sys_call_table error\n");
-		return -EFAULT;
-	}
-	
-	// 获取原地址保存
-	src_sys_open = sys_call_table_address[__NR_open];
-	src_sys_close = sys_call_table_address[__NR_close];
-
-	src_cr0 = close_cr();
-	if (-1 == src_cr0)
-	{
-		printk(KERN_ERR"lxc:get src cr error\n");
-		return -EFAULT;
-	}
-
-	// 替换系统函数地址
-	sys_call_table_address[__NR_open] = (unsigned long)lxc_sys_open;
-	sys_call_table_address[__NR_close] = (unsigned long)lxc_sys_close;
-
-	open_cr(src_cr0);
-
+	printk(KERN_DEBUG"lxc:lxc_read\n");
 	return 0;
+}
+
+// write实现
+ssize_t lxc_write(struct file *filp, const char __user *buff, size_t count, loff_t *offp)
+{
+	printk(KERN_DEBUG"lxc:lxc_write\n");
+	return 0;
+}
+
+// release实现
+int lxc_release(struct inode *inodp, struct file *filp)
+{
+	printk(KERN_DEBUG"lxc:lxc_release\n");
+	return 0;
+}
+
+// lseek实现
+loff_t lxc_llseek(struct file *filp, loff_t off, int whence)
+{
+	printk(KERN_DEBUG"lxc:lxc_llseek\n");
+	return 0;
+}
+
+// poll实现
+unsigned int lxc_poll(struct file *filp, poll_table *wait)
+{
+	printk(KERN_DEBUG"lxc:lxc_poll\n");
+	return 0;
+}
+
+// 设备文件操作
+const struct file_operations lxc_file_operations = 
+{
+	.owner = THIS_MODULE,
+	.open = lxc_open,
+	.read = lxc_read,
+	.write = lxc_write,
+	.release = lxc_release,
+	.unlocked_ioctl = lxc_unlocked_ioctl,
+	.poll = lxc_poll,
+	.llseek = lxc_llseek,
+};
+
+static int __init dev_init(void)
+{
+	int result = 0;
+	struct device * dev_instance = NULL;
+
+	do
+	{
+		// 分配全局内存
+		global_data = (struct dev_data *) kmalloc(sizeof(struct dev_data), GFP_KERNEL);
+		if (NULL == global_data)
+		{
+			printk(KERN_ERR"lxc:init, kmalloc error\n");
+			result = -ENOMEM;
+			goto final_exit;
+		}
+
+		global_data->dev_id = 0;
+
+		// 初始化信号量
+		sema_init(&global_data->dev_sem, 1);
+
+		// 分配设备号
+		result = alloc_chrdev_region(&(global_data->dev_id), 0, 1, "lxcdev");	
+		if (0 != result)
+		{
+			printk(KERN_ERR"lxc:init, alloc_chardev_region error:%d\n", result);	
+			goto release_global;
+		}
+
+		// 初始化设备
+		cdev_init(&global_data->dev_cdev, &lxc_file_operations);
+		global_data->dev_cdev.owner = THIS_MODULE;
+
+		// 添加设备
+		result = cdev_add(&global_data->dev_cdev, global_data->dev_id, 1);		
+		if (0 != result)
+		{
+			printk(KERN_ERR"lxc:init, cdev_add error:%d", result);
+			goto unregister_cdev;
+		}
+
+		// 创建设备类
+		lxcdev_class = class_create(THIS_MODULE, "lxcdev_class");
+		if (IS_ERR(lxcdev_class))
+		{
+			printk(KERN_ERR"lxc:init class_create error\n");
+			result = -ENOMEM;
+			goto del_cdev;
+		}
+
+		// 创建一个设备，以便打开操作
+		dev_instance = device_create(lxcdev_class, NULL, global_data->dev_id, 
+			"lxcdev", "lxcdev%d", 0);
+		if (NULL == dev_instance)
+		{
+			printk(KERN_ERR"lxc:init device_create error\n");
+			result = -ENOMEM;
+			goto destroy_class;
+		}
+
+		goto final_exit;
+	}
+	while (false);
+
+destroy_class:
+	class_destroy(lxcdev_class);
+
+del_cdev:
+	cdev_del(&global_data->dev_cdev);
+
+unregister_cdev:
+	unregister_chrdev_region(global_data->dev_id, 1);	
+
+release_global:
+	kfree(global_data);
+
+final_exit:
+	return result;
 }
 
 static int __init lxcdev_init(void)
@@ -121,6 +195,13 @@ static int __init lxcdev_init(void)
 
 	do
 	{
+		// 初始化设备
+		result = dev_init();
+		if (0 != result)
+		{
+			break;
+		}
+		
 		// 初始化hook
 		result = hook_init();
 		if (0 != result)
@@ -134,65 +215,18 @@ static int __init lxcdev_init(void)
 	return result;
 }
 
-static void __exit hook_uninit(void)
-{
-	printk(KERN_DEBUG"lxc:hook_uninit\n");
-
-	src_cr0 = close_cr();
-	sys_call_table_address[__NR_open] = (unsigned long)src_sys_open;
-	sys_call_table_address[__NR_close] = (unsigned long)src_sys_close;
-	open_cr(src_cr0);
-}
-
 static void __exit lxcdev_uninit(void)
 {
 	printk(KERN_DEBUG"lxc:dev_uninit\n");
+
 	hook_uninit();
-}
 
-asmlinkage long lxc_sys_open(const char __user *filename, int flag, umode_t mode)
-{
-	long result = 0;
-	char *path = NULL;
-	long path_len = 0;
-	char *ext = NULL;
-	bool can_open = true;
-
-	path_len = strlen_user(filename);
-	path = (char *)kmalloc(path_len + 1, GFP_KERNEL);
-
-	if (NULL != path)
-	{
-		memset(path, 0, path_len + 1);
-		if (0 == copy_from_user(path, filename, path_len))
-		{
-			ext = strrchr(path, '.');
-			if (NULL != ext && strcasecmp(ext, ".xyz") == 0)
-			{
-				can_open = false;
-			}
-		}			
-
-		kfree(path);
-	}
-	
-	if (!can_open)
-	{
-		return -EACCES;
-	}
-	
-	// 调用原始打开
-	result = (*src_sys_open)(filename, flag, mode);
-	return result;
-}
-
-asmlinkage long lxc_sys_close(unsigned int fd)
-{
-	long result = 0;
-	result = (*src_sys_close)(fd);
-	return result;
+	device_destroy(lxcdev_class, global_data->dev_id);
+	class_destroy(lxcdev_class);
+	cdev_del(&global_data->dev_cdev);
+	unregister_chrdev_region(global_data->dev_id, 1);
+	kfree(global_data);
 }
 
 module_init(lxcdev_init);
 module_exit(lxcdev_uninit);
-
