@@ -1,4 +1,6 @@
-obj-m:=lxcdev.o
+obj-m:=lxctrl.o
+lxctrl-objs:=lxcdev.o lxchook.o
+
 CURRENT_PATH:=$(shell pwd)
 VERSION_NUM:=$(shell uname -r)
 LINUX_PATH:=/usr/src/linux-headers-$(VERSION_NUM)
